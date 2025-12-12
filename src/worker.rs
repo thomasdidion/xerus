@@ -111,7 +111,8 @@ impl Worker {
             let mut piece_work: PieceWork = match self.work_chan.1.recv() {
                 Ok(piece_work) => piece_work,
                 Err(_) => {
-                    error!("Error: could not receive piece from channel");
+                    // Channel is closed or empty, exit worker gracefully
+                    info!("Worker exiting: work channel closed or empty");
                     return;
                 }
             };
