@@ -33,7 +33,6 @@ use serde_bytes::ByteBuf;
 use std::str;
 use url::Url;
 
-use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -241,36 +240,36 @@ impl Torrent {
     /// * `peer_id` - Urlencoded 20-byte string used as a unique ID for the client.
     /// * `port` - Port number that the client is listening on.
     ///
-    fn build_tracker_url(&self, peer_id: Vec<u8>, port: u16) -> Result<String> {
+     fn build_tracker_url(&self, peer_id: Vec<u8>, port: u16) -> Result<String> {
+        /// Each byte is encoded as %XX where XX is the hexadecimal representation
+        fn percent_encode_binary(data: &[u8]) -> String {
+            const HEX_DIGITS: &[u8] = b"0123456789ABCDEF";
+            let mut encoded = String::with_capacity(data.len() * 3);
+
+            for &byte in data {
+                encoded.push('%');
+                // Extract high nibble (first 4 bits) and convert to hex digit
+                encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+                // Extract low nibble (last 4 bits) and convert to hex digit
+                encoded.push(HEX_DIGITS[(byte & 0x0F) as usize] as char);
+            }
+
+            encoded
+        }
+
         // Parse tracker URL from torrent
         let mut base_url = match Url::parse(&self.announce) {
             Ok(url) => url,
             Err(_) => return Err(anyhow!("could not parse tracker url")),
         };
 
-        // Add parameters to the tracker URL
+        // Add parameters to the tracker URL using proper percent encoding
         base_url
-            // Add info hash
             .query_pairs_mut()
-            .encoding_override(Some(&|input| {
-                if input != "!" {
-                    Cow::Borrowed(input.as_bytes())
-                } else {
-                    Cow::Owned(self.info_hash.clone())
-                }
-            }))
-            .append_pair("info_hash", "!");
+            .append_pair("info_hash", &percent_encode_binary(&self.info_hash));
         base_url
-            // Add peer id
             .query_pairs_mut()
-            .encoding_override(Some(&|input| {
-                if input != "!" {
-                    Cow::Borrowed(input.as_bytes())
-                } else {
-                    Cow::Owned(peer_id.clone())
-                }
-            }))
-            .append_pair("peer_id", "!");
+            .append_pair("peer_id", &percent_encode_binary(&peer_id));
         base_url
             .query_pairs_mut()
             // Add port
