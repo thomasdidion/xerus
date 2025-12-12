@@ -451,7 +451,7 @@ impl Client {
         info!("Attempting to reconnect to peer {:?}", self.peer.id);
 
         // Close existing connection if any
-        if let Err(e) = self.conn.shutdown(std::net::Shutdown::Both) {
+        if let Err(e) = self.conn.shutdown(Shutdown::Both) {
             warn!("Error shutting down existing connection: {}", e);
         }
 
