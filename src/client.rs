@@ -207,7 +207,7 @@ impl Client {
         // If message length is 0, it's a keep-alive
         if message_len == 0 {
             info!("Receive KEEP_ALIVE from peer {:?}", self.peer.id);
-            return Err(anyhow!("keep-alive"));
+            return Ok(Message::new(MESSAGE_KEEPALIVE));
         }
 
         // Read message

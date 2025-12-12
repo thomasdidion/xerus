@@ -257,6 +257,10 @@ impl Worker {
                 MESSAGE_UNCHOKE => client.read_unchoke(),
                 MESSAGE_HAVE => client.read_have(message)?,
                 MESSAGE_PIECE => client.read_piece(message, piece_work)?,
+                MESSAGE_KEEPALIVE => {
+                    // Handle keep-alive message
+                    info!("Received keep-alive from peer");
+                },
                 _ => info!("received unknown message from peer"),
             }
         }

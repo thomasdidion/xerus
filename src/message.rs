@@ -31,6 +31,7 @@ pub const MESSAGE_HAVE: MessageId = 4;
 pub const MESSAGE_BITFIELD: MessageId = 5;
 pub const MESSAGE_REQUEST: MessageId = 6;
 pub const MESSAGE_PIECE: MessageId = 7;
+pub const MESSAGE_KEEPALIVE: MessageId = 255; // Special value for keep-alive (length 0)
 
 #[derive(Default, Debug)]
 pub struct Message {
