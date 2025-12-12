@@ -26,6 +26,8 @@ use crate::piece::*;
 use anyhow::{anyhow, Result};
 use boring::sha::Sha1;
 use crossbeam_channel::{Receiver, Sender};
+use std::thread;
+use std::time::Duration;
 
 // Maximum number of requests
 const NB_REQUESTS_MAX: u32 = 5;
@@ -86,14 +88,57 @@ impl Worker {
             return;
         }
 
-        // Handshake with peer
-        if client.handshake_with_peer().is_err() {
-            return;
+        // Handshake with peer with retry logic
+        let mut retry_count = 0;
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_SECS: u64 = 5;
+
+        while retry_count < MAX_RETRIES {
+            match client.handshake_with_peer() {
+                Ok(_) => break, // Success, exit retry loop
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count < MAX_RETRIES {
+                        warn!("Handshake failed (attempt {}/{}), retrying in {} seconds: {}",
+                              retry_count, MAX_RETRIES, RETRY_DELAY_SECS, e);
+                        thread::sleep(Duration::from_secs(RETRY_DELAY_SECS));
+
+                        // Try to reconnect before retrying
+                        if let Err(connect_err) = client.reconnect() {
+                            warn!("Reconnection failed: {}", connect_err);
+                            continue;
+                        }
+                    } else {
+                        error!("Max handshake retries ({}) exceeded, giving up: {}", MAX_RETRIES, e);
+                        return;
+                    }
+                }
+            }
         }
 
-        // Read bitfield from peer
-        if client.read_bitfield().is_err() {
-            return;
+        // Read bitfield from peer with retry logic
+        let mut retry_count = 0;
+        while retry_count < MAX_RETRIES {
+            match client.read_bitfield() {
+                Ok(_) => break, // Success, exit retry loop
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count < MAX_RETRIES {
+                        warn!("Reading bitfield failed (attempt {}/{}), retrying in {} seconds: {}",
+                              retry_count, MAX_RETRIES, RETRY_DELAY_SECS, e);
+                        thread::sleep(Duration::from_secs(RETRY_DELAY_SECS));
+
+                        // Try to reconnect before retrying
+                        if let Err(connect_err) = client.reconnect() {
+                            warn!("Reconnection failed: {}", connect_err);
+                            continue;
+                        }
+                    } else {
+                        error!("Max bitfield read retries ({}) exceeded, giving up: {}", MAX_RETRIES, e);
+                        return;
+                    }
+                }
+            }
         }
 
         // Send unchoke

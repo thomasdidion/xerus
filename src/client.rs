@@ -27,7 +27,7 @@ use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, Shutdown, TcpStream};
 use std::time::Duration;
 
 /// Client structure.
@@ -442,6 +442,40 @@ impl Client {
 
         // Update requests counter
         piece_work.requests -= 1;
+
+        Ok(())
+    }
+
+    /// Reconnect to the peer.
+    pub fn reconnect(&mut self) -> Result<()> {
+        info!("Attempting to reconnect to peer {:?}", self.peer.id);
+
+        // Close existing connection if any
+        if let Err(e) = self.conn.shutdown(std::net::Shutdown::Both) {
+            warn!("Error shutting down existing connection: {}", e);
+        }
+
+        // Create new connection
+        let peer_socket = SocketAddr::new(IpAddr::V4(self.peer.ip), self.peer.port);
+        let new_conn = match TcpStream::connect(peer_socket) {
+            Ok(conn) => conn,
+            Err(_) => return Err(anyhow!("could not reconnect to peer")),
+        };
+
+        // Set connection timeout
+        if new_conn.set_read_timeout(Some(Duration::from_secs(30))).is_err() {
+            return Err(anyhow!("could not set read timeout on new connection"));
+        }
+
+        if new_conn.set_write_timeout(Some(Duration::from_secs(30))).is_err() {
+            return Err(anyhow!("could not set write timeout on new connection"));
+        }
+
+        // Replace old connection
+        self.conn = new_conn;
+        self.choked = true; // Reset choke state
+
+        info!("Successfully reconnected to peer {:?}", self.peer.id);
 
         Ok(())
     }
