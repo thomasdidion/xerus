@@ -359,7 +359,7 @@ impl Torrent {
             };
 
             // Copy piece data
-            let begin: u32 = piece_result.index * self.piece_length;
+            let begin: u32 = self.get_piece_offset(piece_result.index)?;
             for i in 0..piece_result.length as usize {
                 data[begin as usize + i] = piece_result.data[i];
             }
@@ -390,5 +390,22 @@ impl Torrent {
         }
 
         Ok(end - begin)
+    }
+
+    /// Get piece offset.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The piece index.
+    ///
+    fn get_piece_offset(&self, index: u32) -> Result<u32> {
+        let mut offset: u32 = 0;
+
+        // Calculate the actual offset by summing up the lengths of all previous pieces
+        for i in 0..index {
+            offset += self.get_piece_length(i)?;
+        }
+
+        Ok(offset)
     }
 }
