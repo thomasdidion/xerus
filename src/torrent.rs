@@ -267,32 +267,29 @@ impl Torrent {
         }
 
         // Parse tracker URL from torrent
-        let mut base_url = match Url::parse(&self.announce) {
+        let base_url = match Url::parse(&self.announce) {
             Ok(url) => url,
             Err(_) => return Err(anyhow!("could not parse tracker url")),
         };
 
-        // Add parameters to the tracker URL using proper percent encoding
-        base_url
-            .query_pairs_mut()
-            .append_pair("info_hash", &percent_encode_binary(&self.info_hash));
-        base_url
-            .query_pairs_mut()
-            .append_pair("peer_id", &percent_encode_binary(&peer_id));
-        base_url
-            .query_pairs_mut()
-            // Add port
-            .append_pair("port", &port.to_string())
-            // Add uploaded
-            .append_pair("uploaded", "0")
-            // Add downloaded
-            .append_pair("downloaded", "0")
-            // Add compact
-            .append_pair("compact", "1")
-            // Add left
-            .append_pair("left", &self.length.to_string());
+        // Build query string manually to handle binary data properly
+        let query = format!(
+            "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1&event=started",
+            percent_encode_binary(&self.info_hash),
+            percent_encode_binary(&peer_id),
+            port,
+            self.length
+        );
 
-        Ok(base_url.to_string())
+        let mut url = base_url.to_string();
+        if url.contains('?') {
+            url.push('&');
+        } else {
+            url.push('?');
+        }
+        url.push_str(&query);
+
+        Ok(url)
     }
 
     /// Download torrent.
