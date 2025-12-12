@@ -86,6 +86,9 @@ struct BencodeTorrent {
     #[serde(default)]
     // URL of the tracker
     announce: String,
+    #[serde(rename = "announce-list", default)]
+    // List of tracker URLs
+    announce_list: Vec<Vec<String>>,
     // Informations about file
     info: BencodeInfo,
 }
@@ -174,7 +177,13 @@ impl Torrent {
         }
 
         // Add torrent informations
-        self.announce = bencode.announce.to_owned();
+        self.announce = if !bencode.announce.is_empty() {
+            bencode.announce.to_owned()
+        } else if !bencode.announce_list.is_empty() && !bencode.announce_list[0].is_empty() {
+            bencode.announce_list[0][0].clone()
+        } else {
+            return Err(anyhow!("torrent has no announce or announce-list"));
+        };
         self.info_hash = bencode.info.hash()?;
         self.pieces_hashes = bencode.info.split_pieces_hashes()?;
         self.piece_length = bencode.info.piece_length;
