@@ -113,12 +113,15 @@ impl Client {
         // Create a new bitfield
         let mut bitfield: Vec<u8> = self.bitfield.to_vec();
 
-        // Prevent unbounded values
-        if byte_index < self.bitfield.len() as u32 {
-            // Set piece index into bitfield
-            bitfield[byte_index as usize] |= (1 << (7 - offset)) as u8;
-            self.bitfield = bitfield;
+        // Resize bitfield if needed to accommodate the piece index
+        if byte_index >= bitfield.len() as u32 {
+            let additional_bytes = (byte_index as usize) - bitfield.len() + 1;
+            bitfield.extend(vec![0; additional_bytes]);
         }
+
+        // Set piece index into bitfield
+        bitfield[byte_index as usize] |= (1 << (7 - offset)) as u8;
+        self.bitfield = bitfield;
     }
 
     /// Set connection timeout.
