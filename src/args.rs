@@ -21,7 +21,6 @@ pub fn parse_args<'a>() -> clap::ArgMatches<'a> {
     App::new(crate_name!())
         .version(crate_version!())
         .about("A command-line BitTorrent client, written in Rust.")
-        .author("zenoxygen <zenoxygen@protonmail.com>")
         .arg(
             Arg::with_name("torrent")
                 .help("Path to the .torrent file")

@@ -1,12 +1,12 @@
 [package]
 name = "xerus"
 version = "0.2.0"
-authors = ["zenoxygen <zenoxygen@protonmail.com>"]
+authors = ["Thomas Didion <thomas.didion@protonmail.com>"]
 edition = "2021"
 
 description = "A command-line BitTorrent client, written in Rust."
-homepage = "https://gitlab.com/zenoxygen/xerus"
-repository = "https://gitlab.com/zenoxygen/xerus"
+homepage = "https://github.com/thomasdidion/xerus"
+repository = "https://github.com/thomasdidion/xerus"
 
 keywords = ["torrent", "bittorrent", "p2p"]
 categories = ["command-line-utilities", "network-programming"]
