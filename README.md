@@ -2,7 +2,6 @@
 
 [![Build Status](https://github.com/thomasdidion/xerus/actions/workflows/ci.yaml/badge.svg)](https://github.com/thomasdidion/xerus/actions/workflows/ci.yaml)
 [![Crates.io](https://img.shields.io/crates/v/xerus.svg)](https://crates.io/crates/xerus)
-[![Docs](https://img.shields.io/docsrs/xerus/latest)](https://docs.rs/xerus/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A command-line BitTorrent client, written in Rust.
