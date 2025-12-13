@@ -77,6 +77,9 @@ impl Worker {
         let peer_id_copy = self.peer_id.clone();
         let info_hash_copy = self.info_hash.clone();
 
+        // Store peer id for logging
+        let pid = peer_copy.id;
+
         // Create new client
         let mut client = match Client::new(peer_copy, peer_id_copy, info_hash_copy) {
             Ok(client) => client,
@@ -93,23 +96,32 @@ impl Worker {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY_SECS: u64 = 5;
 
+        debug!("Attempting to connect to peer {:?}", pid);
         while retry_count < MAX_RETRIES {
             match client.handshake_with_peer() {
-                Ok(_) => break, // Success, exit retry loop
+                Ok(_) => {
+                    debug!("Successfully connected to peer {:?}", pid);
+                    break; // Success, exit retry loop
+                }
                 Err(e) => {
                     retry_count += 1;
                     if retry_count < MAX_RETRIES {
-                        warn!("Handshake failed (attempt {}/{}), retrying in {} seconds: {}",
-                              retry_count, MAX_RETRIES, RETRY_DELAY_SECS, e);
+                        debug!(
+                            "Handshake failed (attempt {}/{}), retrying in {} seconds: {}",
+                            retry_count, MAX_RETRIES, RETRY_DELAY_SECS, e
+                        );
                         thread::sleep(Duration::from_secs(RETRY_DELAY_SECS));
 
                         // Try to reconnect before retrying
                         if let Err(connect_err) = client.reconnect() {
-                            warn!("Reconnection failed: {}", connect_err);
+                            debug!("Reconnection failed: {}", connect_err);
                             continue;
                         }
                     } else {
-                        error!("Max handshake retries ({}) exceeded, giving up: {}", MAX_RETRIES, e);
+                        debug!(
+                            "Max handshake retries ({}) exceeded for peer {:?}, giving up: {}",
+                            MAX_RETRIES, pid, e
+                        );
                         return;
                     }
                 }
@@ -124,17 +136,22 @@ impl Worker {
                 Err(e) => {
                     retry_count += 1;
                     if retry_count < MAX_RETRIES {
-                        warn!("Reading bitfield failed (attempt {}/{}), retrying in {} seconds: {}",
-                              retry_count, MAX_RETRIES, RETRY_DELAY_SECS, e);
+                        debug!(
+                            "Reading bitfield failed (attempt {}/{}), retrying in {} seconds: {}",
+                            retry_count, MAX_RETRIES, RETRY_DELAY_SECS, e
+                        );
                         thread::sleep(Duration::from_secs(RETRY_DELAY_SECS));
 
                         // Try to reconnect before retrying
                         if let Err(connect_err) = client.reconnect() {
-                            warn!("Reconnection failed: {}", connect_err);
+                            debug!("Reconnection failed: {}", connect_err);
                             continue;
                         }
                     } else {
-                        error!("Max bitfield read retries ({}) exceeded, giving up: {}", MAX_RETRIES, e);
+                        debug!(
+                            "Max bitfield read retries ({}) exceeded, giving up: {}",
+                            MAX_RETRIES, e
+                        );
                         return;
                     }
                 }
@@ -253,14 +270,20 @@ impl Worker {
 
             // Parse message
             match message.id {
-                MESSAGE_CHOKE => client.read_choke(),
-                MESSAGE_UNCHOKE => client.read_unchoke(),
+                MESSAGE_CHOKE => {
+                    client.read_choke();
+                    warn!("Peer choked us, waiting for unchoke...");
+                }
+                MESSAGE_UNCHOKE => {
+                    client.read_unchoke();
+                    info!("Peer unchoked us, resuming downloads");
+                }
                 MESSAGE_HAVE => client.read_have(message)?,
                 MESSAGE_PIECE => client.read_piece(message, piece_work)?,
                 MESSAGE_KEEPALIVE => {
                     // Handle keep-alive message
                     info!("Received keep-alive from peer");
-                },
+                }
                 _ => info!("received unknown message from peer"),
             }
         }
