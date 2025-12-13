@@ -41,6 +41,7 @@ use anyhow::{anyhow, Result};
 use boring::sha::Sha1;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use indicatif::{ProgressBar, ProgressStyle};
+use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_bencode::{de, ser};
@@ -48,9 +49,11 @@ use serde_bytes::ByteBuf;
 use std::str;
 use url::Url;
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -65,8 +68,8 @@ const SHA1_HASH_SIZE: usize = 20;
 /// from peer discovery through file assembly.
 #[derive(Default, Clone)]
 pub struct Torrent {
-    /// Tracker URL for peer discovery
-    announce: String,
+    /// Tracker tiers for peer discovery (each tier is a list of URLs)
+    tiers: Vec<Vec<String>>,
     /// 20-byte SHA-1 hash of the bencoded info dictionary
     info_hash: Vec<u8>,
     /// Vector of 20-byte SHA-1 hashes, one for each piece
@@ -205,13 +208,18 @@ impl Torrent {
         }
 
         // Add torrent informations
-        self.announce = if !bencode.announce.is_empty() {
-            bencode.announce.to_owned()
-        } else if !bencode.announce_list.is_empty() && !bencode.announce_list[0].is_empty() {
-            bencode.announce_list[0][0].clone()
+        if !bencode.announce_list.is_empty() {
+            // Use announce-list, shuffle each tier as per BEP 12
+            self.tiers = bencode.announce_list.clone();
+            for tier in &mut self.tiers {
+                let mut rng = rand::thread_rng();
+                tier.shuffle(&mut rng);
+            }
+        } else if !bencode.announce.is_empty() {
+            self.tiers = vec![vec![bencode.announce.to_owned()]];
         } else {
             return Err(anyhow!("torrent has no announce or announce-list"));
-        };
+        }
         self.info_hash = bencode.info.hash()?;
         self.pieces_hashes = bencode.info.split_pieces_hashes()?;
         self.piece_length = bencode.info.piece_length;
@@ -223,7 +231,7 @@ impl Torrent {
         Ok(())
     }
 
-    /// Request peers from tracker.
+    /// Request peers from trackers.
     ///
     /// # Arguments
     ///
@@ -231,53 +239,129 @@ impl Torrent {
     /// * `port` - Port number that the client is listening on.
     ///
     fn request_peers(&self, peer_id: Vec<u8>, port: u16) -> Result<Vec<Peer>> {
-        // Build tracker URL
-        let tracker_url = match self.build_tracker_url(peer_id, port) {
-            Ok(url) => url,
-            Err(_) => return Err(anyhow!("could not build tracker url")),
-        };
+        // Flatten all tiers into a unique list of tracker URLs
+        let mut unique_urls = HashSet::new();
+        for tier in &self.tiers {
+            for url in tier {
+                unique_urls.insert(url.clone());
+            }
+        }
+        let tracker_urls: Vec<String> = unique_urls.into_iter().collect();
 
-        // Build blocking HTTP client
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-        {
-            Ok(client) => client,
-            Err(_) => return Err(anyhow!("could not connect to tracker")),
-        };
+        if tracker_urls.is_empty() {
+            return Err(anyhow!("no tracker URLs available"));
+        }
 
-        // Send GET request to the tracker
-        let response = match client.get(tracker_url).send() {
-            Ok(response) => match response.bytes() {
-                Ok(bytes) => bytes,
-                Err(_) => return Err(anyhow!("could not read response from tracker")),
-            },
-            Err(_) => return Err(anyhow!("could not send request to tracker")),
-        };
+        // Shared storage for peers bytes from successful tracker responses
+        let all_peers_bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
 
-        // Deserialize bencoded tracker response
-        let tracker_bencode = match de::from_bytes::<BencodeTracker>(&response) {
-            Ok(bencode) => bencode,
-            Err(_) => return Err(anyhow!("could not decode tracker response")),
-        };
+        // Query all trackers in parallel
+        for tracker_url in tracker_urls {
+            let peer_id_clone = peer_id.clone();
+            let info_hash_clone = self.info_hash.clone();
+            let length_clone = self.length;
+            let all_peers_bytes_clone = Arc::clone(&all_peers_bytes);
 
-        // Build peers from tracker response
-        let peers: Vec<Peer> = match self.build_peers(tracker_bencode.peers.to_vec()) {
-            Ok(peers) => peers,
-            Err(_) => return Err(anyhow!("could not build peers")),
-        };
+            let handle = thread::spawn(move || {
+                // Build tracker URL
+                let full_url = match Torrent::build_tracker_url(
+                    &info_hash_clone,
+                    &tracker_url,
+                    peer_id_clone,
+                    port,
+                    length_clone,
+                ) {
+                    Ok(url) => url,
+                    Err(_) => return, // skip on error
+                };
 
-        Ok(peers)
+                // Build blocking HTTP client
+                let client = match reqwest::blocking::Client::builder()
+                    .timeout(Duration::from_secs(15))
+                    .build()
+                {
+                    Ok(client) => client,
+                    Err(_) => return, // skip on error
+                };
+
+                // Send GET request to the tracker
+                let response = match client.get(&full_url).send() {
+                    Ok(response) => match response.bytes() {
+                        Ok(bytes) => bytes,
+                        Err(_) => return, // skip on error
+                    },
+                    Err(_) => return, // skip on error
+                };
+
+                // Deserialize bencoded tracker response
+                let tracker_bencode = match de::from_bytes::<BencodeTracker>(&response) {
+                    Ok(bencode) => bencode,
+                    Err(_) => return, // skip on error
+                };
+
+                // Store the peers bytes
+                if let Ok(mut guard) = all_peers_bytes_clone.lock() {
+                    guard.push(tracker_bencode.peers.to_vec());
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            let _ = handle.join();
+        }
+
+        // Collect all peers from the responses
+        let all_peers_bytes = all_peers_bytes.lock().unwrap();
+        let mut all_peers = Vec::new();
+        for peers_bytes in all_peers_bytes.iter() {
+            match self.build_peers(peers_bytes.clone()) {
+                Ok(mut peers) => all_peers.append(&mut peers),
+                Err(_) => continue, // skip invalid peers
+            }
+        }
+
+        if all_peers.is_empty() {
+            return Err(anyhow!("could not get peers from any tracker"));
+        }
+
+        // Deduplicate peers by (ip, port)
+        let mut unique_peers = HashSet::new();
+        let mut deduped_peers = Vec::new();
+        for peer in all_peers {
+            if unique_peers.insert((peer.ip, peer.port)) {
+                deduped_peers.push(peer);
+            }
+        }
+
+        // Assign sequential IDs
+        for (i, peer) in deduped_peers.iter_mut().enumerate() {
+            peer.id = i as u32;
+        }
+
+        Ok(deduped_peers)
     }
 
     /// Build tracker URL.
     ///
     /// # Arguments
     ///
+    /// * `info_hash` - The 20-byte SHA-1 hash of the info dictionary.
+    /// * `announce` - The tracker URL.
     /// * `peer_id` - Urlencoded 20-byte string used as a unique ID for the client.
     /// * `port` - Port number that the client is listening on.
+    /// * `length` - Total file size in bytes.
     ///
-    fn build_tracker_url(&self, peer_id: Vec<u8>, port: u16) -> Result<String> {
+    fn build_tracker_url(
+        info_hash: &[u8],
+        announce: &str,
+        peer_id: Vec<u8>,
+        port: u16,
+        length: u32,
+    ) -> Result<String> {
         /// Each byte is encoded as %XX where XX is the hexadecimal representation
         fn percent_encode_binary(data: &[u8]) -> String {
             const HEX_DIGITS: &[u8] = b"0123456789ABCDEF";
@@ -295,7 +379,7 @@ impl Torrent {
         }
 
         // Parse tracker URL from torrent
-        let base_url = match Url::parse(&self.announce) {
+        let base_url = match Url::parse(announce) {
             Ok(url) => url,
             Err(_) => return Err(anyhow!("could not parse tracker url")),
         };
@@ -303,10 +387,10 @@ impl Torrent {
         // Build query string manually to handle binary data properly
         let query = format!(
             "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1&event=started",
-            percent_encode_binary(&self.info_hash),
+            percent_encode_binary(info_hash),
             percent_encode_binary(&peer_id),
             port,
-            self.length
+            length
         );
 
         let mut url = base_url.to_string();
