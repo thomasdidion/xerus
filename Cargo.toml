@@ -19,7 +19,7 @@ exclude = [".gitignore"]
 anyhow = "1.0.75"
 boring = "4.2.0"
 byteorder = "1.5.0"
-clap = "2.33"
+clap = { version = "4.5.53", features = ["derive"] }
 crossbeam-channel = "0.5.8"
 hex = "0.4.3"
 indicatif = "0.17.7"

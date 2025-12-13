@@ -10,21 +10,17 @@ A command-line BitTorrent client, written in Rust.
 ## Usage
 
 ```
-xerus 0.2.0
 A command-line BitTorrent client, written in Rust.
 
-USAGE:
-    xerus [OPTIONS] <torrent>
+Usage: xerus [OPTIONS] <TORRENT>
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+Arguments:
+  <TORRENT>  Path to the .torrent file
 
-OPTIONS:
-    -o, --output <output>    Output filename (defaults to name from torrent)
-
-ARGS:
-    <torrent>    Path to the .torrent file
+Options:
+  -o, --output <OUTPUT>  Output filename (defaults to name from torrent)
+  -h, --help             Print help
+  -V, --version          Print version
 ```
 
 ## Example

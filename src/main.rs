@@ -29,7 +29,6 @@
 #[macro_use]
 extern crate log;
 
-mod args;
 mod client;
 mod handshake;
 mod message;
@@ -43,9 +42,23 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-
-use args::parse_args;
+use clap::Parser;
 use torrent::*;
+
+#[derive(Parser, Debug)]
+#[command(
+    author,
+    version,
+    about = "A command-line BitTorrent client, written in Rust."
+)]
+struct Args {
+    /// Path to the .torrent file
+    torrent: String,
+
+    /// Output filename (defaults to name from torrent)
+    #[arg(short = 'o', long)]
+    output: Option<String>,
+}
 
 /// Sanitize a filename to prevent path traversal and basic issues.
 fn sanitize_filename(filename: &str) -> String {
@@ -60,12 +73,12 @@ fn sanitize_filename(filename: &str) -> String {
     }
 }
 
-fn run(args: clap::ArgMatches) -> Result<()> {
+fn run(args: Args) -> Result<()> {
     // Get torrent file path
-    let torrent = args.value_of("torrent").unwrap();
+    let torrent = &args.torrent;
 
     // Get output file path (optional, defaults to torrent name)
-    let output_file = args.value_of("output");
+    let output_file = args.output.as_deref();
 
     // Check if torrent file exists
     if !Path::new(&torrent).exists() {
@@ -138,7 +151,7 @@ fn main() {
     pretty_env_logger::init_timed();
 
     // Parse arguments
-    let args = parse_args();
+    let args = Args::parse();
 
     // Run program, eventually exit failure
     if let Err(error) = run(args) {
