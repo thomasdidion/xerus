@@ -15,15 +15,14 @@ zenoxygen <zenoxygen@protonmail.com>
 A command-line BitTorrent client, written in Rust.
 
 USAGE:
-    xerus -f <file> -t <torrent>
+    xerus <torrent>
 
 FLAGS:
     -h, --help       Prints help information
     -V, --version    Prints version information
 
 OPTIONS:
-    -f <file>           The path where to save the file
-    -t <torrent>        The path to the torrent
+    -o <output>        Output filename (defaults to name from torrent)
 ```
 
 ## Example
@@ -31,16 +30,16 @@ OPTIONS:
 Try to download an official Debian ISO image:
 
 ```
-$> ./xerus -f debian-10.7.0-amd64-netinst.iso -t debian-10.7.0-amd64-netinst.iso.torrent
-Downloading "debian-10.7.0-amd64-netinst.iso" (1344 pieces)
-Saved in "debian-10.7.0-amd64-netinst.iso".
+$> ./xerus debian-13.2.0-amd64-netinst.iso.torrent
+Downloading "debian-13.2.0-amd64-netinst.iso" (3136 pieces)
+Saved in "debian-13.2.0-amd64-netinst.iso".
 ```
 
 And verify the checksum matches that expected from the checksum file:
 
 ```
-$> sha512sum -c SHA512SUM | grep debian-10.7.0-amd64-netinst.iso
-debian-10.7.0-amd64-netinst.iso: OK
+$> sha512sum -c SHA512SUM | grep debian-13.2.0-amd64-netinst.iso
+debian-13.2.0-amd64-netinst.iso: OK
 ```
 
 ## Debug
@@ -48,7 +47,7 @@ debian-10.7.0-amd64-netinst.iso: OK
 Run with the environment variable set:
 
 ```
-$> RUST_LOG=trace ./xerus -f <file> -t <torrent>
+$> RUST_LOG=trace ./xerus <torrent>
 ```
 
 ## Documentation

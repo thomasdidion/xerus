@@ -1,22 +1,36 @@
-// Copyright (c) 2020 zenoxygen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! # BitTorrent Worker Thread
+//!
+//! This module implements the worker thread that manages downloading from a single peer.
+//! Each worker handles one peer connection and coordinates piece downloads through channels.
+//!
+//! ## Worker Architecture
+//!
+//! - **One worker per peer**: Each peer gets its own thread for concurrent downloads
+//! - **Channel-based coordination**: Uses crossbeam channels for work distribution
+//! - **Piece pipeline**: Receives work, downloads pieces, verifies integrity, sends results
+//!
+//! ## Download Process
+//!
+//! 1. **Connection**: Establish TCP connection and perform BitTorrent handshake
+//! 2. **Bitfield Exchange**: Learn which pieces the peer has
+//! 3. **Choke Management**: Handle choke/unchoke states for flow control
+//! 4. **Piece Requests**: Request blocks in parallel (up to 5 concurrent requests)
+//! 5. **Data Assembly**: Collect blocks into complete pieces
+//! 6. **Verification**: SHA-1 hash verification against torrent metadata
+//! 7. **Result Reporting**: Send completed pieces back via channel
+//!
+//! ## Error Handling
+//!
+//! - Connection timeouts and automatic reconnection
+//! - Retry logic for handshake and bitfield reading
+//! - Graceful handling of choked peers
+//! - Piece verification failures trigger redownload
+//!
+//! ## Performance Optimizations
+//!
+//! - Pipelined requests: Send multiple block requests before receiving responses
+//! - Block size: 16KB blocks for efficient network usage
+//! - Concurrent downloads: Multiple workers download different pieces simultaneously
 
 use crate::client::*;
 use crate::message::*;
@@ -29,29 +43,46 @@ use crossbeam_channel::{Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-// Maximum number of requests
+// Maximum number of concurrent block requests per peer
 const NB_REQUESTS_MAX: u32 = 5;
 
-// Block size limit (2^14) in bytes
+// Standard block size for piece downloads (16KB)
 const BLOCK_SIZE_MAX: u32 = 16384;
 
+/// Manages downloading from a single BitTorrent peer.
+///
+/// Each worker runs in its own thread and handles the complete download lifecycle
+/// for one peer, from connection establishment to piece verification.
 pub struct Worker {
+    /// Information about the remote peer (IP, port, ID)
     peer: Peer,
+    /// 20-byte unique identifier for this client instance
     peer_id: Vec<u8>,
+    /// 20-byte SHA-1 hash of the torrent's info dictionary
     info_hash: Vec<u8>,
+    /// Channel for receiving piece work assignments and returning unassigned work
     work_chan: (Sender<PieceWork>, Receiver<PieceWork>),
+    /// Channel for sending completed piece results
     result_chan: (Sender<PieceResult>, Receiver<PieceResult>),
 }
 
 impl Worker {
-    /// Build a new worker.
+    /// Creates a new worker instance for managing downloads from a peer.
+    ///
+    /// Sets up the worker with peer information and communication channels.
+    /// The worker will establish its own connection to the peer when started.
     ///
     /// # Arguments
     ///
-    /// * `peer` - A remote peer to connect to.
-    /// * `work_chan` - The channel to send and receive work pieces.
-    /// * `result_chan` - The channel to send result pieces.
+    /// * `peer` - Peer information including IP address and port
+    /// * `peer_id` - 20-byte unique identifier for this client
+    /// * `info_hash` - 20-byte SHA-1 hash of the torrent info dictionary
+    /// * `work_chan` - Tuple of (sender, receiver) for piece work coordination
+    /// * `result_chan` - Tuple of (sender, receiver) for completed piece results
     ///
+    /// # Returns
+    ///
+    /// Returns a `Result<Worker>` with the configured worker instance.
     pub fn new(
         peer: Peer,
         peer_id: Vec<u8>,

@@ -1,26 +1,22 @@
-// Copyright (c) 2020 zenoxygen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! # Command-Line Argument Parsing
+//!
+//! This module handles parsing and validation of command-line arguments.
+//!
+//! ## Arguments
+//!
+//! - `<torrent>`: Path to the .torrent file (required)
+//! - `-o, --output <output>`: Output filename (defaults to name from torrent)
+//!
+//! ## Example
+//!
+//! ```bash
+//! xerus debian.iso.torrent
+//! xerus debian.iso.torrent -o debian.iso
+//! ```
 
 use clap::{crate_name, crate_version, App, Arg};
 
-/// Parse arguments.
+/// Parse command-line arguments.
 pub fn parse_args<'a>() -> clap::ArgMatches<'a> {
     App::new(crate_name!())
         .version(crate_version!())
@@ -28,17 +24,16 @@ pub fn parse_args<'a>() -> clap::ArgMatches<'a> {
         .author("zenoxygen <zenoxygen@protonmail.com>")
         .arg(
             Arg::with_name("torrent")
-                .short("t")
-                .help("The path to the torrent")
-                .number_of_values(1)
-                .required(true),
+                .help("Path to the .torrent file")
+                .required(true)
+                .index(1),
         )
         .arg(
-            Arg::with_name("file")
-                .short("f")
-                .help("The path where to save the file")
-                .number_of_values(1)
-                .required(true),
+            Arg::with_name("output")
+                .short("o")
+                .long("output")
+                .help("Output filename (defaults to name from torrent)")
+                .takes_value(true),
         )
         .get_matches()
 }

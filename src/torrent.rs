@@ -1,22 +1,37 @@
-// Copyright (c) 2020 zenoxygen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! # BitTorrent Torrent Management
+//!
+//! This module handles torrent file parsing, tracker communication, and download
+//! coordination. It implements the core BitTorrent protocol logic for managing
+//! the download process from torrent metadata to completed files.
+//!
+//! ## Torrent File Format
+//!
+//! Torrent files contain metadata in bencoded format:
+//!
+//! - **announce**: Tracker URL for peer discovery
+//! - **info**: Dictionary with file information and piece hashes
+//! - **pieces**: Concatenated SHA-1 hashes for integrity verification
+//! - **piece length**: Size of each piece (typically 256KB-1MB)
+//! - **length**: Total file size
+//! - **name**: Suggested filename
+//!
+//! ## Download Coordination
+//!
+//! The Torrent struct coordinates the entire download process:
+//!
+//! 1. **Parse torrent file** and extract metadata
+//! 2. **Contact tracker** to discover peers
+//! 3. **Create worker threads** for each peer
+//! 4. **Distribute piece work** via channels
+//! 5. **Collect results** and assemble the final file
+//! 6. **Progress tracking** with visual progress bar
+//!
+//! ## Multi-threading Architecture
+//!
+//! - **Main thread**: Coordinates overall download process
+//! - **Worker threads**: One per peer, handle piece downloads
+//! - **Channels**: Crossbeam channels for work distribution and result collection
+//! - **Progress bar**: Indicatif progress bar for user feedback
 
 use crate::peer::*;
 use crate::piece::*;
@@ -39,27 +54,32 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
+// Default port for BitTorrent client connections
 const PORT: u16 = 6881;
+// Size of SHA-1 hash in bytes
 const SHA1_HASH_SIZE: usize = 20;
 
-/// Torrent structure.
+/// Represents a BitTorrent torrent and manages the download process.
+///
+/// Contains all metadata from the torrent file and coordinates the download
+/// from peer discovery through file assembly.
 #[derive(Default, Clone)]
 pub struct Torrent {
-    // URL of the tracker
+    /// Tracker URL for peer discovery
     announce: String,
-    // 20-byte SHA-1 hash calculated over the content of the bencoded info dictionary
+    /// 20-byte SHA-1 hash of the bencoded info dictionary
     info_hash: Vec<u8>,
-    // SHA-1 hashes of each pieces
+    /// Vector of 20-byte SHA-1 hashes, one for each piece
     pieces_hashes: Vec<Vec<u8>>,
-    // Size of each piece in bytes
+    /// Size of each piece in bytes (except possibly the last)
     piece_length: u32,
-    // Size of the file in bytes
+    /// Total size of the file in bytes
     length: u32,
-    // Suggested filename where to save the file
+    /// Suggested filename from torrent metadata
     name: String,
-    // Urlencoded 20-byte string used as unique client ID
+    /// 20-byte unique identifier for this client instance
     peer_id: Vec<u8>,
-    // Peers
+    /// List of discovered peers available for downloading
     peers: Vec<Peer>,
 }
 
@@ -124,7 +144,7 @@ impl BencodeInfo {
         let nb_pieces = pieces.len();
 
         // Check torrent pieces
-        if nb_pieces % SHA1_HASH_SIZE != 0 {
+        if !nb_pieces.is_multiple_of(SHA1_HASH_SIZE) {
             return Err(anyhow!("torrent is invalid"));
         }
         let nb_hashes = nb_pieces / SHA1_HASH_SIZE;
@@ -143,6 +163,14 @@ impl Torrent {
     /// Build a new torrent.
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Returns the suggested filename from the torrent metadata.
+    ///
+    /// This is the filename specified in the torrent's "name" field,
+    /// which should be used as the default output filename.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Open torrent.
@@ -249,7 +277,7 @@ impl Torrent {
     /// * `peer_id` - Urlencoded 20-byte string used as a unique ID for the client.
     /// * `port` - Port number that the client is listening on.
     ///
-     fn build_tracker_url(&self, peer_id: Vec<u8>, port: u16) -> Result<String> {
+    fn build_tracker_url(&self, peer_id: Vec<u8>, port: u16) -> Result<String> {
         /// Each byte is encoded as %XX where XX is the hexadecimal representation
         fn percent_encode_binary(data: &[u8]) -> String {
             const HEX_DIGITS: &[u8] = b"0123456789ABCDEF";

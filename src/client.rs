@@ -1,22 +1,55 @@
-// Copyright (c) 2020 zenoxygen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! # BitTorrent Peer Client
+//!
+//! This module implements the client-side peer wire protocol for BitTorrent,
+//! handling TCP connections, message exchange, and piece downloading from remote peers.
+//!
+//! ## Protocol Overview
+//!
+//! The peer wire protocol operates over TCP and consists of:
+//!
+//! 1. **Handshake**: Initial protocol negotiation with peer identification
+//! 2. **Bitfield Exchange**: Sharing which pieces each peer has
+//! 3. **Choke/Unchoke Management**: Flow control for download rates
+//! 4. **Piece Requests**: Requesting specific blocks of data
+//! 5. **Piece Transfer**: Receiving and validating downloaded pieces
+//!
+//! ## Message Format
+//!
+//! All messages follow a common format:
+//!
+//! ```text
+//! <length prefix><message ID><payload>
+//! ```
+//!
+//! - Length prefix: 4 bytes (big-endian u32)
+//! - Message ID: 1 byte
+//! - Payload: Variable length (length - 1 bytes)
+//!
+//! ## Bitfield Encoding
+//!
+//! The bitfield is a compact representation of piece availability:
+//!
+//! - Each byte represents 8 pieces
+//! - Bit 7 (MSB) = piece index 0, bit 0 (LSB) = piece index 7
+//! - Set bits indicate available pieces, clear bits indicate missing pieces
+//! - Trailing bits in the last byte are set to 0
+//!
+//! ## Connection States
+//!
+//! Peers can be in various states affecting download capability:
+//!
+//! - **Choked**: Peer won't send requested pieces
+//! - **Interested**: Client wants to download from this peer
+//! - **Unchoked**: Peer will respond to piece requests
+//!
+//! ## Error Handling
+//!
+//! The client implements robust error handling with:
+//!
+//! - Connection timeouts and reconnection logic
+//! - Message validation and parsing error detection
+//! - Piece integrity verification via SHA-1 hashing
+//! - Graceful degradation when peers become unavailable
 
 use crate::handshake::*;
 use crate::message::*;
@@ -27,33 +60,52 @@ use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, SocketAddr, Shutdown, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::time::Duration;
 
-/// Client structure.
+/// Represents a connection to a remote BitTorrent peer.
+///
+/// Manages the TCP connection, protocol state, and piece downloading for a single peer.
+/// Each client instance corresponds to one peer in the swarm and handles all communication
+/// with that peer according to the BitTorrent peer wire protocol.
 pub struct Client {
-    // A peer
+    /// Information about the remote peer (IP, port, ID)
     peer: Peer,
-    // Torrent peer id
+    /// 20-byte unique identifier for this client instance
     peer_id: Vec<u8>,
-    // Torrent info hash
+    /// 20-byte SHA-1 hash of the torrent's info dictionary
     info_hash: Vec<u8>,
-    // Connection to peer
+    /// TCP stream connection to the peer
     conn: TcpStream,
-    // Bitfield of pieces
+    /// Bitfield indicating which pieces the peer has (compact boolean array)
     bitfield: Vec<u8>,
-    // Peer has choked this client
+    /// Whether the peer has choked this client (preventing downloads)
     choked: bool,
 }
 
 impl Client {
-    /// Build a new client.
+    /// Creates a new client instance and establishes TCP connection to a peer.
+    ///
+    /// This involves:
+    /// 1. Creating a socket address from peer IP and port
+    /// 2. Establishing TCP connection with 15-second timeout
+    /// 3. Initializing client state (choked, empty bitfield)
     ///
     /// # Arguments
     ///
-    /// * `peer_id` - Urlencoded 20-byte string used as a unique ID for the client.
-    /// * `info_hash` - 20-byte SHA-1 hash of the info key in the metainfo file.
+    /// * `peer` - Peer information including IP address and port
+    /// * `peer_id` - 20-byte unique identifier for this client (randomly generated)
+    /// * `info_hash` - 20-byte SHA-1 hash of the torrent's info dictionary
     ///
+    /// # Returns
+    ///
+    /// Returns a `Result<Client>` with the connected client or an error if connection fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - TCP connection cannot be established within timeout
+    /// - Socket address creation fails
     pub fn new(peer: Peer, peer_id: Vec<u8>, info_hash: Vec<u8>) -> Result<Client> {
         // Open connection with remote peer
         let peer_socket = SocketAddr::new(IpAddr::V4(peer.ip), peer.port);
@@ -77,17 +129,34 @@ impl Client {
         Ok(client)
     }
 
-    // Return choked value.
+    /// Returns whether this client is choked by the peer.
+    ///
+    /// A choked client cannot request pieces from the peer until unchoked.
+    /// This is part of BitTorrent's flow control mechanism.
     pub fn is_choked(&self) -> bool {
         self.choked
     }
 
-    /// Check if peer has a piece.
+    /// Checks if the peer has a specific piece available for download.
+    ///
+    /// Performs bitfield lookup using compact bit array representation.
+    /// Each byte in the bitfield represents 8 pieces, with bits ordered from MSB to LSB.
     ///
     /// # Arguments
     ///
-    /// * `index` - The piece index to check.
+    /// * `index` - Zero-based piece index to check
     ///
+    /// # Returns
+    ///
+    /// `true` if the peer has the piece, `false` otherwise or if index is out of bounds.
+    ///
+    /// # Bitfield Format
+    ///
+    /// ```text
+    /// Byte 0: [piece 7, 6, 5, 4, 3, 2, 1, 0]
+    /// Byte 1: [piece 15, 14, 13, 12, 11, 10, 9, 8]
+    /// ...
+    /// ```
     pub fn has_piece(&self, index: u32) -> bool {
         let byte_index = index / 8;
         let offset = index % 8;
@@ -100,12 +169,19 @@ impl Client {
         false
     }
 
-    /// Set a piece that peer has.
+    /// Marks a piece as available in the peer's bitfield.
+    ///
+    /// Updates the compact bit array representation. Automatically resizes the bitfield
+    /// if the piece index exceeds current capacity.
     ///
     /// # Arguments
     ///
-    /// * `index` - The piece index to update into bitfield.
+    /// * `index` - Zero-based piece index to mark as available
     ///
+    /// # Bitfield Growth
+    ///
+    /// The bitfield grows dynamically: if piece index 100 is set but bitfield only
+    /// has space for 64 pieces (8 bytes), it will be extended to accommodate.
     pub fn set_piece(&mut self, index: u32) {
         let byte_index = index / 8;
         let offset = index % 8;
@@ -124,12 +200,22 @@ impl Client {
         self.bitfield = bitfield;
     }
 
-    /// Set connection timeout.
+    /// Sets read and write timeouts on the TCP connection.
+    ///
+    /// Prevents the client from hanging indefinitely on slow or unresponsive peers.
+    /// Both read and write timeouts are set to the same value.
     ///
     /// # Arguments
     ///
-    /// * `secs` - The timeout in seconds.
+    /// * `secs` - Timeout duration in seconds
     ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if timeouts are set successfully, or an error if the operation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying TCP stream doesn't support timeout configuration.
     pub fn set_connection_timeout(&self, secs: u64) -> Result<()> {
         // Set write timeout
         if self
@@ -152,7 +238,35 @@ impl Client {
         Ok(())
     }
 
-    /// Handshake with remote peer.
+    /// Performs the BitTorrent handshake protocol with the remote peer.
+    ///
+    /// The handshake consists of:
+    /// 1. Sending our handshake message (protocol, reserved bytes, info_hash, peer_id)
+    /// 2. Receiving peer's handshake response
+    /// 3. Validating the peer's info_hash matches ours
+    ///
+    /// # Handshake Message Format
+    ///
+    /// ```text
+    /// <pstrlen><pstr><reserved><info_hash><peer_id>
+    /// ```
+    ///
+    /// - pstrlen: 1 byte (length of pstr, usually 19)
+    /// - pstr: variable length protocol string ("BitTorrent protocol")
+    /// - reserved: 8 bytes (all zeros)
+    /// - info_hash: 20 bytes
+    /// - peer_id: 20 bytes
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if handshake succeeds, or an error if protocol negotiation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Handshake serialization fails
+    /// - Network send/receive fails
+    /// - Peer sends invalid handshake (wrong info_hash)
     pub fn handshake_with_peer(&mut self) -> Result<()> {
         // Create handshake
         let peer_id = self.peer_id.clone();
@@ -181,7 +295,20 @@ impl Client {
         Ok(())
     }
 
-    /// Read handshake length.
+    /// Reads the first byte of the peer's handshake to determine protocol string length.
+    ///
+    /// The first byte indicates how many bytes follow for the protocol identifier.
+    /// For standard BitTorrent, this should be 19 (length of "BitTorrent protocol").
+    ///
+    /// # Returns
+    ///
+    /// Returns the protocol string length as `usize`, or an error if reading fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Network read fails
+    /// - Received length is 0 (invalid)
     fn read_handshake_len(&mut self) -> Result<usize> {
         // Read 1 byte into buffer
         let mut buf = [0; 1];
@@ -200,7 +327,27 @@ impl Client {
         Ok(handshake_len as usize)
     }
 
-    /// Read message from remote peer.
+    /// Reads and parses a message from the peer according to the peer wire protocol.
+    ///
+    /// Messages have a 4-byte big-endian length prefix, followed by the message ID and payload.
+    /// Length 0 indicates a keep-alive message (no ID or payload).
+    ///
+    /// # Message Format
+    ///
+    /// ```text
+    /// <length: u32><id: u8><payload: [u8]>
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// Returns a parsed `Message` struct, or an error if reading/parsing fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Network read fails
+    /// - Message deserialization fails
+    /// - Invalid message format received
     pub fn read_message(&mut self) -> Result<Message> {
         let message_len: usize = self.read_message_len()?;
 
@@ -222,7 +369,18 @@ impl Client {
         Ok(message)
     }
 
-    /// Read message length.
+    /// Reads the 4-byte length prefix of an incoming message.
+    ///
+    /// The length prefix indicates the total bytes following (message ID + payload).
+    /// Uses big-endian byte order as per BitTorrent specification.
+    ///
+    /// # Returns
+    ///
+    /// Returns the message length in bytes, or an error if reading fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if network read fails or data cannot be parsed as u32.
     fn read_message_len(&mut self) -> Result<usize> {
         // Read bytes into buffer
         let mut buf = vec![0; 4];
@@ -237,13 +395,23 @@ impl Client {
         Ok(message_len as usize)
     }
 
-    /// Read CHOKE message from remote peer.
+    /// Processes a CHOKE message from the peer.
+    ///
+    /// When choked, the peer will not respond to piece requests from this client.
+    /// This is part of BitTorrent's flow control mechanism.
     pub fn read_choke(&mut self) {
         info!("Receive MESSAGE_CHOKE from peer {:?}", self.peer.id);
         self.choked = true
     }
 
-    /// Send UNCHOKE message to remote peer.
+    /// Sends an UNCHOKE message to the peer.
+    ///
+    /// Signals that we are willing to accept piece requests from this peer.
+    /// In practice, most clients unchoke all peers immediately after handshake.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if message is sent successfully, or an error if network send fails.
     pub fn send_unchoke(&mut self) -> Result<()> {
         let message: Message = Message::new(MESSAGE_UNCHOKE);
         let message_encoded = message.serialize()?;
@@ -257,13 +425,23 @@ impl Client {
         Ok(())
     }
 
-    /// Read UNCHOKE message from remote peer.
+    /// Processes an UNCHOKE message from the peer.
+    ///
+    /// When unchoked, the peer will respond to our piece requests.
+    /// This allows the download process to begin or resume.
     pub fn read_unchoke(&mut self) {
         info!("Receive MESSAGE_UNCHOKE from peer {:?}", self.peer.id);
         self.choked = false
     }
 
-    /// Send INTERESTED message to remote peer.
+    /// Sends an INTERESTED message to the peer.
+    ///
+    /// Signals that we are interested in downloading pieces from this peer.
+    /// Required before sending REQUEST messages.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if message is sent successfully, or an error if network send fails.
     pub fn send_interested(&mut self) -> Result<()> {
         let message: Message = Message::new(MESSAGE_INTERESTED);
         let message_encoded = message.serialize()?;
@@ -277,12 +455,43 @@ impl Client {
         Ok(())
     }
 
-    /// Send HAVE message to remote peer.
+    /// Sends a NOT INTERESTED message to indicate we don't want to download from this peer.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if message is sent successfully, or an error if network send fails.
+    #[allow(dead_code)]
+    pub fn send_not_interested(&mut self) -> Result<()> {
+        let message: Message = Message::new(MESSAGE_NOT_INTERESTED);
+        let message_encoded = message.serialize()?;
+
+        info!("Send MESSAGE_NOT_INTERESTED to peer {:?}", self.peer.id);
+
+        if self.conn.write(&message_encoded).is_err() {
+            return Err(anyhow!("could not send MESSAGE_NOT_INTERESTED to peer"));
+        }
+
+        Ok(())
+    }
+
+    /// Sends a HAVE message to notify the peer that we now have a piece.
+    ///
+    /// This informs other peers in the swarm about our piece availability,
+    /// helping with rarest-first piece selection algorithms.
     ///
     /// # Arguments
     ///
-    /// * `index` - The index of a piece that has just been successfully downloaded and verified.
+    /// * `index` - Zero-based index of the piece we successfully downloaded and verified
     ///
+    /// # Message Format
+    ///
+    /// ```text
+    /// <len=0005><id=4><piece index: u32>
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if message is sent successfully, or an error if network send fails.
     pub fn send_have(&mut self, index: u32) -> Result<()> {
         let mut payload: Vec<u8> = vec![];
         payload.write_u32::<BigEndian>(index)?;
@@ -299,14 +508,28 @@ impl Client {
         Ok(())
     }
 
-    /// Read HAVE message from remote peer.
+    /// Processes a HAVE message from the peer and updates their bitfield.
     ///
-    /// The message payload is the zero-based index of a piece that has just been successfully downloaded and verified via the hash.
+    /// The peer is notifying us that they now have a specific piece available.
+    /// We update our record of their piece availability for future download decisions.
     ///
     /// # Arguments
     ///
-    /// * `message` - The message to parse.
+    /// * `message` - HAVE message containing the piece index in payload
     ///
+    /// # Message Format
+    ///
+    /// ```text
+    /// <len=0005><id=4><piece index: u32>
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the message is processed successfully, or an error if the message format is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message payload doesn't contain exactly 4 bytes for the piece index.
     pub fn read_have(&mut self, message: Message) -> Result<()> {
         info!("Receive MESSAGE_HAVE from peer {:?}", self.peer.id);
 
@@ -325,13 +548,33 @@ impl Client {
         Ok(())
     }
 
-    /// Read BITFIELD message from remote peer.
+    /// Reads and processes the peer's BITFIELD message containing their piece availability.
     ///
-    /// The message payload is a bitfield representing the pieces that have been successfully downloaded.
-    /// The high bit in the first byte corresponds to piece index 0.
-    /// Bits that are cleared indicated a missing piece, and set bits indicate a valid and available piece.
-    /// Spare bits at the end are set to zero.
+    /// The bitfield is a compact representation showing which pieces the peer has.
+    /// This is typically sent immediately after handshake and before other messages.
     ///
+    /// # Bitfield Format
+    ///
+    /// ```text
+    /// <len><id=5><bitfield bytes>
+    /// ```
+    ///
+    /// Each byte represents 8 pieces:
+    /// - Bit 7 (MSB) = piece index 0
+    /// - Bit 6 = piece index 1
+    /// - ...
+    /// - Bit 0 (LSB) = piece index 7
+    ///
+    /// Set bits indicate available pieces, clear bits indicate missing pieces.
+    /// Unused bits in the final byte are set to zero.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if bitfield is read and stored successfully, or an error if reading fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message ID is not BITFIELD or network read fails.
     pub fn read_bitfield(&mut self) -> Result<()> {
         info!("Receive MESSAGE_BITFIELD from peer {:?}", self.peer.id);
 
@@ -346,16 +589,32 @@ impl Client {
         Ok(())
     }
 
-    /// Send REQUEST message to remote peer.
+    /// Sends a REQUEST message to ask the peer for a specific block of data.
     ///
-    /// The request message is fixed length, and is used to request a block.
+    /// Pieces are downloaded in smaller blocks (typically 16KB) to allow parallel downloading
+    /// and to handle network interruptions gracefully. Multiple REQUESTs can be pipelined.
     ///
     /// # Arguments
     ///
-    /// * `index` - The zero-based piece index.
-    /// * `begin` - The zero-based byte offset within the piece.
-    /// * `length` - The requested length.
+    /// * `index` - Zero-based piece index
+    /// * `begin` - Zero-based byte offset within the piece
+    /// * `length` - Number of bytes to request (usually 2^14 = 16384)
     ///
+    /// # Message Format
+    ///
+    /// ```text
+    /// <len=0013><id=6><index: u32><begin: u32><length: u32>
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if request is sent successfully, or an error if network send fails.
+    ///
+    /// # Protocol Notes
+    ///
+    /// - Client must be unchoked and interested to send requests
+    /// - Peer must have the requested piece
+    /// - Request size should not exceed 2^14 bytes
     pub fn send_request(&mut self, index: u32, begin: u32, length: u32) -> Result<()> {
         let mut payload: Vec<u8> = vec![];
         payload.write_u32::<BigEndian>(index)?;
@@ -380,18 +639,82 @@ impl Client {
         Ok(())
     }
 
-    /// Read PIECE message from remote peer.
+    /// Sends a CANCEL message to cancel a pending request.
     ///
-    /// The message payload contains the following information:
-    /// - index: integer specifying the zero-based piece index
-    /// - begin: integer specifying the zero-based byte offset within the piece
-    /// - block: block of data, which is a subset of the piece specified by index.
+    /// This is used during endgame mode to prevent duplicate downloads of the same block.
     ///
     /// # Arguments
     ///
-    /// * `message` - The message to parse.
-    /// * `piece_work` - A work piece.
+    /// * `index` - Zero-based piece index
+    /// * `begin` - Zero-based byte offset within the piece
+    /// * `length` - Number of bytes to cancel (usually 2^14 = 16384)
     ///
+    /// # Message Format
+    ///
+    /// ```text
+    /// <len=0013><id=8><index: u32><begin: u32><length: u32>
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if cancel is sent successfully, or an error if network send fails.
+    #[allow(dead_code)]
+    pub fn send_cancel(&mut self, index: u32, begin: u32, length: u32) -> Result<()> {
+        let mut payload: Vec<u8> = vec![];
+        payload.write_u32::<BigEndian>(index)?;
+        payload.write_u32::<BigEndian>(begin)?;
+        payload.write_u32::<BigEndian>(length)?;
+
+        let message: Message = Message::new_with_payload(MESSAGE_CANCEL, payload);
+        let message_encoded = message.serialize()?;
+
+        info!(
+            "Send MESSAGE_CANCEL for piece {:?} [{:?}:{:?}] to peer {:?}",
+            index,
+            begin,
+            begin + length,
+            self.peer.id
+        );
+
+        if self.conn.write(&message_encoded).is_err() {
+            return Err(anyhow!("could not send MESSAGE_CANCEL to peer"));
+        }
+
+        Ok(())
+    }
+
+    /// Processes a PIECE message containing requested block data from the peer.
+    ///
+    /// This is the response to a REQUEST message, containing the actual file data.
+    /// The block is copied into the appropriate position in the piece buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - PIECE message with payload containing index, begin, and block data
+    /// * `piece_work` - Piece work structure to update with received data
+    ///
+    /// # Message Format
+    ///
+    /// ```text
+    /// <len><id=7><index: u32><begin: u32><block: [u8]>
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the piece block is processed successfully, or an error if validation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Message payload is too short (< 8 bytes)
+    /// - Piece index doesn't match expected piece
+    /// - Block offset exceeds piece boundaries
+    /// - Block size is invalid
+    ///
+    /// # Data Integrity
+    ///
+    /// The received block is copied directly into the piece buffer at the specified offset.
+    /// Integrity verification happens later via SHA-1 hash of the complete piece.
     pub fn read_piece(&mut self, message: Message, piece_work: &mut PieceWork) -> Result<()> {
         info!("Receive MESSAGE_PIECE from peer {:?}", self.peer.id);
 
@@ -449,7 +772,28 @@ impl Client {
         Ok(())
     }
 
-    /// Reconnect to the peer.
+    /// Attempts to reconnect to the peer after a connection failure.
+    ///
+    /// Closes the existing connection gracefully, establishes a new TCP connection,
+    /// and sets up timeouts. The choke state is reset since it's connection-specific.
+    ///
+    /// # Reconnection Process
+    ///
+    /// 1. Shutdown existing connection (both read/write)
+    /// 2. Create new TCP connection to peer
+    /// 3. Set read/write timeouts (30 seconds)
+    /// 4. Reset choke state to true
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if reconnection succeeds, or an error if connection fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - TCP connection cannot be established
+    /// - Timeout configuration fails
+    /// - Peer is no longer reachable
     pub fn reconnect(&mut self) -> Result<()> {
         info!("Attempting to reconnect to peer {:?}", self.peer.id);
 
@@ -466,11 +810,17 @@ impl Client {
         };
 
         // Set connection timeout
-        if new_conn.set_read_timeout(Some(Duration::from_secs(30))).is_err() {
+        if new_conn
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .is_err()
+        {
             return Err(anyhow!("could not set read timeout on new connection"));
         }
 
-        if new_conn.set_write_timeout(Some(Duration::from_secs(30))).is_err() {
+        if new_conn
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .is_err()
+        {
             return Err(anyhow!("could not set write timeout on new connection"));
         }
 

@@ -1,62 +1,78 @@
-// Copyright (c) 2020 zenoxygen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! # BitTorrent Piece Management
+//!
+//! This module defines structures for managing piece downloads in the BitTorrent protocol.
+//! Pieces are verification units of the torrent data, typically 256KB-1MB in size.
+//! They are downloaded in smaller blocks (16KB) for efficiency.
+//!
+//! ## Piece Download Process
+//!
+//! 1. **PieceWork**: Tracks the download state of a single piece
+//! 2. **PieceResult**: Represents a completed piece ready for verification
+//! 3. **Block Requests**: Pieces are downloaded in smaller blocks (16KB) for efficiency
+//!
+//! ## Piece Verification
+//!
+//! Each piece has a SHA-1 hash stored in the torrent metadata. After download,
+//! the piece data is hashed and compared to ensure integrity.
+//!
+//! ## Download State Tracking
+//!
+//! PieceWork maintains counters for:
+//! - Number of block requests sent
+//! - Total bytes requested vs downloaded
+//! - Piece data buffer for assembly
 
-/// PieceWork structure.
+/// Tracks the download progress and state of a single piece.
+///
+/// Manages the lifecycle of downloading one piece from multiple peers,
+/// including block requests, data assembly, and progress tracking.
 #[derive(Default, Debug, Clone)]
 pub struct PieceWork {
-    // Piece index
+    /// Zero-based index of this piece in the torrent
     pub index: u32,
-    // Piece hash
+    /// SHA-1 hash of the piece for verification (20 bytes)
     pub hash: Vec<u8>,
-    // Piece length
+    /// Total length of the piece in bytes
     pub length: u32,
-    // Piece data
+    /// Buffer containing downloaded piece data (initialized to zeros)
     pub data: Vec<u8>,
-    // Requests number sent
+    /// Number of block requests sent for this piece
     pub requests: u32,
-    // Size of requested data in bytes
+    /// Total bytes requested from peers
     pub requested: u32,
-    // Size of downloaded data in bytes
+    /// Total bytes successfully downloaded and stored
     pub downloaded: u32,
 }
 
-/// PieceResult structure.
+/// Represents a completed piece that has been fully downloaded.
+///
+/// Contains the piece data and metadata, ready for hash verification
+/// and writing to the output file.
 #[derive(Default, Debug, Clone)]
 pub struct PieceResult {
-    // Piece index
+    /// Zero-based index of this piece in the torrent
     pub index: u32,
-    // Piece length
+    /// Total length of the piece in bytes
     pub length: u32,
-    // Piece data
+    /// Complete piece data buffer
     pub data: Vec<u8>,
 }
 
 impl PieceWork {
-    /// Build a new work piece.
+    /// Creates a new PieceWork instance for downloading a piece.
+    ///
+    /// Initializes the piece data buffer with the correct size and sets up
+    /// tracking counters for download progress.
     ///
     /// # Arguments
     ///
-    /// * `index` - The piece index.
-    /// * `hash` - The piece hash.
-    /// * `length` - The piece length.
+    /// * `index` - Zero-based piece index in the torrent
+    /// * `hash` - SHA-1 hash bytes for piece verification
+    /// * `length` - Total size of the piece in bytes
     ///
+    /// # Returns
+    ///
+    /// A new `PieceWork` instance ready for download coordination.
     pub fn new(index: u32, hash: Vec<u8>, length: u32) -> PieceWork {
         PieceWork {
             index,
@@ -71,14 +87,20 @@ impl PieceWork {
 }
 
 impl PieceResult {
-    /// Build a new result piece.
+    /// Creates a new PieceResult from completed download data.
+    ///
+    /// Used when a piece has been fully assembled and is ready for
+    /// verification and storage.
     ///
     /// # Arguments
     ///
-    /// * `index` - The piece index.
-    /// * `length` - The piece length.
-    /// * `data` - The piece data.
+    /// * `index` - Zero-based piece index in the torrent
+    /// * `length` - Total size of the piece in bytes
+    /// * `data` - Complete piece data buffer
     ///
+    /// # Returns
+    ///
+    /// A new `PieceResult` instance containing the piece data.
     pub fn new(index: u32, length: u32, data: Vec<u8>) -> PieceResult {
         PieceResult {
             index,

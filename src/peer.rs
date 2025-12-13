@@ -1,22 +1,30 @@
-// Copyright (c) 2020 zenoxygen
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! # BitTorrent Peer Information
+//!
+//! This module defines the `Peer` structure and provides functionality for parsing
+//! peer information received from BitTorrent trackers.
+//!
+//! ## Peer Discovery
+//!
+//! Peers are discovered through tracker communication. The tracker responds with a
+//! compact binary format containing IP addresses and ports of available peers.
+//!
+//! ## Compact Peer Format
+//!
+//! The compact format consists of 6-byte entries:
+//!
+//! ```text
+//! <IP: 4 bytes><Port: 2 bytes>
+//! ```
+//!
+//! - IP address in network byte order (big-endian)
+//! - Port number in network byte order (big-endian)
+//!
+//! ## Peer Structure
+//!
+//! Each peer contains:
+//! - Unique ID for internal tracking
+//! - IPv4 address
+//! - Port number for connection
 
 use crate::torrent::*;
 
@@ -30,16 +38,25 @@ const PEER_SIZE: usize = 6;
 
 type PeerId = u32;
 
-/// Peer structure.
+/// Represents a BitTorrent peer in the swarm.
+///
+/// Contains the network information needed to connect to a peer and a unique
+/// identifier for internal tracking purposes.
 #[derive(Clone)]
 pub struct Peer {
+    /// Unique identifier assigned to this peer for internal tracking
     pub id: PeerId,
+    /// IPv4 address of the peer
     pub ip: Ipv4Addr,
+    /// Port number for connecting to the peer
     pub port: u16,
 }
 
 impl Peer {
-    /// Build a new peer.
+    /// Creates a new peer with default/placeholder values.
+    ///
+    /// Used as a template when parsing peer lists from tracker responses.
+    /// The actual values are filled in during parsing.
     pub fn new() -> Peer {
         Peer {
             id: 0,
@@ -50,17 +67,37 @@ impl Peer {
 }
 
 impl Torrent {
-    /// Build peers.
+    /// Parses a compact peer list from tracker response into Peer structures.
+    ///
+    /// Converts the binary peer list received from the tracker into a vector of
+    /// Peer instances that can be used for connection establishment.
     ///
     /// # Arguments
     ///
-    /// * `tracker_peers` - A string consisting of multiples of 6 bytes.
-    /// First 4 bytes are the IP address and last 2 bytes are the port number.
-    /// All in network (big endian) notation.
+    /// * `tracker_peers` - Compact binary peer list where each peer is 6 bytes:
+    ///   - Bytes 0-3: IPv4 address (big-endian)
+    ///   - Bytes 4-5: Port number (big-endian)
     ///
+    /// # Returns
+    ///
+    /// Returns a `Result<Vec<Peer>>` containing all parsed peers, or an error if
+    /// the peer list format is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer list length is not a multiple of 6 bytes.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// // Assuming tracker returned 12 bytes (2 peers)
+    /// let peer_data = vec![192, 168, 1, 1, 0, 80, 192, 168, 1, 2, 0, 80];
+    /// let peers = torrent.build_peers(peer_data)?;
+    /// assert_eq!(peers.len(), 2);
+    /// ```
     pub fn build_peers(&self, tracker_peers: Vec<u8>) -> Result<Vec<Peer>> {
         // Check tracker peers are valid
-        if tracker_peers.len() % PEER_SIZE != 0 {
+        if !tracker_peers.len().is_multiple_of(PEER_SIZE) {
             return Err(anyhow!("received invalid peers from tracker"));
         }
 
