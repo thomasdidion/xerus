@@ -202,9 +202,9 @@ impl Torrent {
 
         // Generate a random 20-byte peer id
         let mut peer_id: Vec<u8> = vec![0; 20];
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for x in peer_id.iter_mut() {
-            *x = rng.gen();
+            *x = rng.random::<u8>();
         }
 
         // Add torrent informations
@@ -212,7 +212,7 @@ impl Torrent {
             // Use announce-list, shuffle each tier as per BEP 12
             self.tiers = bencode.announce_list.clone();
             for tier in &mut self.tiers {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 tier.shuffle(&mut rng);
             }
         } else if !bencode.announce.is_empty() {
