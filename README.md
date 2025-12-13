@@ -10,19 +10,22 @@ A command-line BitTorrent client, written in Rust.
 ## Usage
 
 ```
-xerus 0.1.0
+xerus 0.2.0
 zenoxygen <zenoxygen@protonmail.com>
 A command-line BitTorrent client, written in Rust.
 
 USAGE:
-    xerus <torrent>
+    xerus [OPTIONS] <torrent>
 
 FLAGS:
     -h, --help       Prints help information
     -V, --version    Prints version information
 
 OPTIONS:
-    -o <output>        Output filename (defaults to name from torrent)
+    -o, --output <output>    Output filename (defaults to name from torrent)
+
+ARGS:
+    <torrent>    Path to the .torrent file
 ```
 
 ## Example
@@ -30,7 +33,7 @@ OPTIONS:
 Try to download an official Debian ISO image:
 
 ```
-$> ./xerus debian-13.2.0-amd64-netinst.iso.torrent
+$> xerus debian-13.2.0-amd64-netinst.iso.torrent
 Downloading "debian-13.2.0-amd64-netinst.iso" (3136 pieces)
 Saved in "debian-13.2.0-amd64-netinst.iso".
 ```
@@ -42,12 +45,32 @@ $> sha512sum -c SHA512SUM | grep debian-13.2.0-amd64-netinst.iso
 debian-13.2.0-amd64-netinst.iso: OK
 ```
 
+## Installation
+
+### From crates.io (recommended)
+
+```bash
+cargo install xerus
+```
+
+### From source
+
+```bash
+cargo install --path .
+```
+
+## Uninstallation
+
+```bash
+cargo uninstall xerus
+```
+
 ## Debug
 
 Run with the environment variable set:
 
 ```
-$> RUST_LOG=trace ./xerus <torrent>
+$> RUST_LOG=trace xerus <torrent>
 ```
 
 ## Documentation
