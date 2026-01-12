@@ -141,22 +141,15 @@ impl BencodeInfo {
 
     /// Split bencoded pieces into vectors of SHA-1 hashes.
     fn split_pieces_hashes(&self) -> Result<Vec<Vec<u8>>> {
-        let pieces = self.pieces.to_owned();
-        let nb_pieces = pieces.len();
-
-        // Check torrent pieces
-        if !nb_pieces.is_multiple_of(SHA1_HASH_SIZE) {
+        if !self.pieces.len().is_multiple_of(SHA1_HASH_SIZE) {
             return Err(anyhow!("torrent is invalid"));
         }
-        let nb_hashes = nb_pieces / SHA1_HASH_SIZE;
-        let mut hashes: Vec<Vec<u8>> = vec![vec![0; 20]; nb_hashes];
 
-        // Split pieces
-        for i in 0..nb_hashes {
-            hashes[i] = pieces[i * SHA1_HASH_SIZE..(i + 1) * SHA1_HASH_SIZE].to_vec();
-        }
-
-        Ok(hashes)
+        Ok(self
+            .pieces
+            .chunks(SHA1_HASH_SIZE)
+            .map(|chunk| chunk.to_vec())
+            .collect())
     }
 }
 
@@ -221,27 +214,21 @@ impl Torrent {
         self.piece_length = bencode.info.piece_length;
         self.length = bencode.info.length;
         self.name = bencode.info.name.to_owned();
-        self.peer_id = peer_id.clone();
-        self.peers = self.request_peers(peer_id, PORT)?;
+        self.peers = self.request_peers(&peer_id, PORT)?;
+        self.peer_id = peer_id;
 
         Ok(())
     }
 
     /// Request peers from trackers.
-    ///
-    /// # Arguments
-    ///
-    /// * `peer_id` - Urlencoded 20-byte string used as a unique ID for the client.
-    /// * `port` - Port number that the client is listening on.
-    ///
-    fn request_peers(&self, peer_id: Vec<u8>, port: u16) -> Result<Vec<Peer>> {
+    fn request_peers(&self, peer_id: &[u8], port: u16) -> Result<Vec<Peer>> {
         let mut all_peers = Vec::new();
         let mut seen = HashSet::new();
 
         for tier in &self.tiers {
             let mut success = false;
             for url in tier {
-                if let Ok(peers) = self.query_single_tracker(url, &peer_id, port) {
+                if let Ok(peers) = self.query_single_tracker(url, peer_id, port) {
                     for peer in peers {
                         if seen.insert((peer.ip, peer.port)) {
                             all_peers.push(peer);
@@ -274,32 +261,17 @@ impl Torrent {
     /// * `port` - The port number.
     ///
     fn query_single_tracker(&self, announce: &str, peer_id: &[u8], port: u16) -> Result<Vec<Peer>> {
-        let url = Self::build_tracker_url(
-            &self.info_hash,
-            announce,
-            peer_id.to_vec(),
-            port,
-            self.length,
-        )?;
+        let url = Self::build_tracker_url(&self.info_hash, announce, peer_id, port, self.length)?;
         let bytes = reqwest::blocking::get(&url)?.bytes()?;
         let resp = de::from_bytes::<BencodeTracker>(&bytes)?;
         self.build_peers(resp.peers.to_vec())
     }
 
     /// Build tracker URL.
-    ///
-    /// # Arguments
-    ///
-    /// * `info_hash` - The 20-byte SHA-1 hash of the info dictionary.
-    /// * `announce` - The tracker URL.
-    /// * `peer_id` - Urlencoded 20-byte string used as a unique ID for the client.
-    /// * `port` - Port number that the client is listening on.
-    /// * `length` - Total file size in bytes.
-    ///
     fn build_tracker_url(
         info_hash: &[u8],
         announce: &str,
-        peer_id: Vec<u8>,
+        peer_id: &[u8],
         port: u16,
         length: u32,
     ) -> Result<String> {
@@ -329,7 +301,7 @@ impl Torrent {
         let query = format!(
             "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1&event=started",
             percent_encode_binary(info_hash),
-            percent_encode_binary(&peer_id),
+            percent_encode_binary(peer_id),
             port,
             length
         );
@@ -374,24 +346,15 @@ impl Torrent {
         }
 
         // Init workers
-        let peers = self.peers.to_owned();
-        for peer in peers {
-            let peer_copy = peer.clone();
-            let peer_id_copy = self.peer_id.clone();
-            let info_hash_copy = self.info_hash.clone();
-            let work_chan_copy = work_chan.clone();
-            let result_chan_copy = result_chan.clone();
-
-            // Create new worker
+        for peer in &self.peers {
             let worker = Worker::new(
-                peer_copy,
-                peer_id_copy,
-                info_hash_copy,
-                work_chan_copy,
-                result_chan_copy,
+                peer.clone(),
+                self.peer_id.clone(),
+                self.info_hash.clone(),
+                work_chan.clone(),
+                result_chan.clone(),
             )?;
 
-            // Start worker in a new thread
             thread::spawn(move || {
                 worker.start_download();
             });
@@ -417,10 +380,9 @@ impl Torrent {
             };
 
             // Copy piece data
-            let begin: u32 = self.get_piece_offset(piece_result.index)?;
-            for i in 0..piece_result.length as usize {
-                data[begin as usize + i] = piece_result.data[i];
-            }
+            let begin = self.get_piece_offset(piece_result.index) as usize;
+            let end = begin + piece_result.length as usize;
+            data[begin..end].copy_from_slice(&piece_result.data);
 
             // Update progress bar
             pb.inc(piece_result.length as u64);
@@ -456,14 +418,7 @@ impl Torrent {
     ///
     /// * `index` - The piece index.
     ///
-    fn get_piece_offset(&self, index: u32) -> Result<u32> {
-        let mut offset: u32 = 0;
-
-        // Calculate the actual offset by summing up the lengths of all previous pieces
-        for i in 0..index {
-            offset += self.get_piece_length(i)?;
-        }
-
-        Ok(offset)
+    fn get_piece_offset(&self, index: u32) -> u32 {
+        index * self.piece_length
     }
 }
