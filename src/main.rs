@@ -74,29 +74,19 @@ fn sanitize_filename(filename: &str) -> String {
 }
 
 fn run(args: Args) -> Result<()> {
-    // Get torrent file path
-    let torrent = &args.torrent;
+    let torrent_path = &args.torrent;
 
-    // Get output file path (optional, defaults to torrent name)
-    let output_file = args.output.as_deref();
-
-    // Check if torrent file exists
-    if !Path::new(&torrent).exists() {
-        return Err(anyhow!("could not find torrent file: {}", torrent));
+    if !Path::new(torrent_path).exists() {
+        return Err(anyhow!("could not find torrent file: {}", torrent_path));
     }
 
-    let torrent_filepath = PathBuf::from(torrent);
-
-    // Open torrent to get metadata (needed for default filename)
-    let mut temp_torrent = Torrent::new();
-    temp_torrent.open(torrent_filepath.clone())?;
-    let raw_filename = temp_torrent.name().to_string();
-
-    // Sanitize the filename to make it safe
-    let default_filename = sanitize_filename(&raw_filename);
+    // Open torrent file
+    let mut torrent = Torrent::new();
+    torrent.open(PathBuf::from(torrent_path))?;
 
     // Determine output filename
-    let output_filename = output_file.unwrap_or(&default_filename);
+    let default_filename = sanitize_filename(torrent.name());
+    let output_filename = args.output.as_deref().unwrap_or(&default_filename);
     let output_filepath = PathBuf::from(output_filename);
 
     // Check if output file already exists
@@ -107,15 +97,16 @@ fn run(args: Args) -> Result<()> {
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_lowercase();
 
-        if input != "y" && input != "yes" {
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
             println!("Download cancelled.");
             return Ok(());
         }
     }
 
-    // Create output file
+    // Download torrent
+    let data = torrent.download()?;
+
     let mut output_file = match File::create(&output_filepath) {
         Ok(file) => file,
         Err(e) => {
@@ -127,13 +118,7 @@ fn run(args: Args) -> Result<()> {
         }
     };
 
-    // Download torrent
-    let mut torrent = Torrent::new();
-    torrent.open(torrent_filepath)?;
-    let data: Vec<u8> = torrent.download()?;
-
-    // Save data to file
-    if let Err(e) = output_file.write(&data) {
+    if let Err(e) = output_file.write_all(&data) {
         return Err(anyhow!(
             "could not write data to file '{}': {}",
             output_filename,
@@ -153,12 +138,8 @@ fn main() {
     // Parse arguments
     let args = Args::parse();
 
-    // Run program, eventually exit failure
     if let Err(error) = run(args) {
         eprintln!("Error: {}", error);
         std::process::exit(1);
     }
-
-    // Exit success
-    std::process::exit(0);
 }
