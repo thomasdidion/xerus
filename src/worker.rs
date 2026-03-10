@@ -45,6 +45,12 @@ use std::time::Duration;
 
 // Maximum number of concurrent block requests per peer
 const NB_REQUESTS_MAX: u32 = 5;
+// Maximum number of handshake/bitfield retry attempts
+const MAX_RETRIES: u32 = 3;
+// Delay between retry attempts in seconds
+const RETRY_DELAY_SECS: u64 = 5;
+// Read/write timeout for piece downloads in seconds
+const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 
 // Standard block size for piece downloads (16KB)
 const BLOCK_SIZE_MAX: u32 = 16384;
@@ -117,15 +123,8 @@ impl Worker {
             Err(_) => return,
         };
 
-        // Set connection timeout
-        if client.set_connection_timeout(5).is_err() {
-            return;
-        }
-
         // Handshake with peer with retry logic
         let mut retry_count = 0;
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY_SECS: u64 = 5;
 
         debug!("Attempting to connect to peer {:?}", pid);
         while retry_count < MAX_RETRIES {
@@ -264,7 +263,7 @@ impl Worker {
     ///
     fn download_piece(&self, client: &mut Client, piece_work: &mut PieceWork) -> Result<()> {
         // Set client connection timeout
-        client.set_connection_timeout(120)?;
+        client.set_connection_timeout(DOWNLOAD_TIMEOUT_SECS)?;
 
         // Reset piece counters
         piece_work.requests = 0;

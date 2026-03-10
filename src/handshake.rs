@@ -33,8 +33,8 @@
 //!
 //! ## Reserved Bytes
 //!
-//! Currently all 8 reserved bytes are set to 0. Future extensions may use these
-//! to negotiate additional capabilities like DHT support, encryption, etc.
+//! The 8 reserved bytes are used to negotiate protocol extensions:
+//! - Bit 20 (byte 5, bit 4): Extension protocol support (BEP 10)
 //!
 //! ## Security Considerations
 //!
@@ -55,7 +55,7 @@ pub struct Handshake {
     pub pstrlen: usize,
     /// Protocol identifier bytes ("BitTorrent protocol")
     pub pstr: Vec<u8>,
-    /// 8 reserved bytes for future protocol extensions (currently all zeros)
+    /// 8 reserved bytes for protocol extensions
     pub reserved: Vec<u8>,
     /// 20-byte SHA-1 hash of the torrent's info dictionary
     pub info_hash: Vec<u8>,
@@ -84,8 +84,9 @@ impl Handshake {
         let pstr = String::from(PROTOCOL_ID).into_bytes();
         // Get pstrlen
         let pstrlen = pstr.len();
-        // Get reserved
-        let reserved: Vec<u8> = vec![0; 8];
+        // Get reserved - set bit 20 (byte 5, bit 4) for extension protocol (BEP 10)
+        let mut reserved: Vec<u8> = vec![0; 8];
+        reserved[5] |= 0x10;
 
         Handshake {
             pstrlen,
@@ -94,6 +95,11 @@ impl Handshake {
             info_hash,
             peer_id,
         }
+    }
+
+    /// Returns true if this handshake indicates extension protocol support (BEP 10).
+    pub fn supports_extensions(&self) -> bool {
+        self.reserved.len() > 5 && (self.reserved[5] & 0x10) != 0
     }
 
     /// Serializes the handshake into a byte vector for network transmission.

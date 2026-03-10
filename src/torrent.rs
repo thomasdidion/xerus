@@ -1,30 +1,24 @@
 //! # BitTorrent Torrent Management
 //!
-//! This module handles torrent file parsing, tracker communication, and download
-//! coordination. It implements the core BitTorrent protocol logic for managing
-//! the download process from torrent metadata to completed files.
+//! This module handles torrent file and magnet link parsing, tracker communication,
+//! and download coordination. It implements the core BitTorrent protocol logic for
+//! managing the download process from torrent metadata to completed files.
 //!
-//! ## Torrent File Format
+//! ## Supported Inputs
 //!
-//! Torrent files contain metadata in bencoded format:
-//!
-//! - **announce**: Tracker URL for peer discovery
-//! - **info**: Dictionary with file information and piece hashes
-//! - **pieces**: Concatenated SHA-1 hashes for integrity verification
-//! - **piece length**: Size of each piece (typically 256KB-1MB)
-//! - **length**: Total file size
-//! - **name**: Suggested filename
+//! - **Torrent files**: Bencoded `.torrent` files with full metadata
+//! - **Magnet links**: URI with info_hash, fetches metadata from peers (BEP 9, BEP 10)
 //!
 //! ## Download Coordination
 //!
 //! The Torrent struct coordinates the entire download process:
 //!
-//! 1. **Parse torrent file** and extract metadata
+//! 1. **Parse input** (torrent file or magnet link)
 //! 2. **Contact tracker** to discover peers
-//! 3. **Create worker threads** for each peer
-//! 4. **Distribute piece work** via channels
-//! 5. **Collect results** and assemble the final file
-//! 6. **Progress tracking** with visual progress bar
+//! 3. **Fetch metadata** from peers (magnet links only)
+//! 4. **Create worker threads** for each peer
+//! 5. **Distribute piece work** via channels
+//! 6. **Collect results** and assemble the final file
 //!
 //! ## Multi-threading Architecture
 //!
@@ -33,8 +27,10 @@
 //! - **Channels**: Crossbeam channels for work distribution and result collection
 //! - **Progress bar**: Indicatif progress bar for user feedback
 
+use crate::magnet;
 use crate::peer::*;
 use crate::piece::*;
+use crate::tracker;
 use crate::worker::*;
 
 use anyhow::{anyhow, Result};
@@ -46,10 +42,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_bencode::{de, ser};
 use serde_bytes::ByteBuf;
-use std::str;
-use url::Url;
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -62,6 +55,15 @@ const SHA1_HASH_SIZE: usize = 20;
 
 /// Represents a BitTorrent torrent and manages the download process.
 ///
+/// File entry for multi-file torrents.
+#[derive(Default, Clone, Debug)]
+pub struct FileInfo {
+    /// Size of this file in bytes
+    pub length: u64,
+    /// Path components for this file (e.g., ["dir", "subdir", "file.txt"])
+    pub path: Vec<String>,
+}
+
 /// Contains all metadata from the torrent file and coordinates the download
 /// from peer discovery through file assembly.
 #[derive(Default, Clone)]
@@ -74,14 +76,25 @@ pub struct Torrent {
     pieces_hashes: Vec<Vec<u8>>,
     /// Size of each piece in bytes (except possibly the last)
     piece_length: u32,
-    /// Total size of the file in bytes
-    length: u32,
+    /// Total size of all files in bytes
+    length: u64,
     /// Suggested filename from torrent metadata
     name: String,
     /// 20-byte unique identifier for this client instance
     peer_id: Vec<u8>,
     /// List of discovered peers available for downloading
     peers: Vec<Peer>,
+    /// File list for multi-file torrents (empty for single-file)
+    files: Vec<FileInfo>,
+}
+
+/// Single file entry in multi-file torrent.
+#[derive(Deserialize, Serialize)]
+struct BencodeFile {
+    // Size of this file in bytes
+    length: u64,
+    // Path components for this file
+    path: Vec<String>,
 }
 
 /// BencodeInfo structure.
@@ -93,9 +106,12 @@ struct BencodeInfo {
     // Size of each piece in bytes
     #[serde(rename = "piece length")]
     piece_length: u32,
-    // Size of the file in bytes
-    #[serde(rename = "length")]
-    length: u32,
+    // Size of the file in bytes (single-file mode)
+    #[serde(rename = "length", default)]
+    length: Option<u64>,
+    // Files list (multi-file mode)
+    #[serde(default)]
+    files: Option<Vec<BencodeFile>>,
     // Suggested filename where to save the file
     #[serde(rename = "name")]
     name: String,
@@ -114,15 +130,6 @@ struct BencodeTorrent {
     info: BencodeInfo,
 }
 
-/// BencodeTracker structure.
-#[derive(Debug, Deserialize, Serialize)]
-struct BencodeTracker {
-    // Interval time to refresh the list of peers in seconds
-    interval: u32,
-    // Peers IP addresses
-    peers: ByteBuf,
-}
-
 impl BencodeInfo {
     /// Hash bencoded informations to uniquely identify a file.
     fn hash(&self) -> Result<Vec<u8>> {
@@ -137,6 +144,31 @@ impl BencodeInfo {
         let hash = hasher.finish().to_vec();
 
         Ok(hash)
+    }
+
+    /// Calculates total length from either single-file length or multi-file sum.
+    fn total_length(&self) -> Result<u64> {
+        if let Some(length) = self.length {
+            Ok(length)
+        } else if let Some(ref files) = self.files {
+            Ok(files.iter().map(|f| f.length).sum())
+        } else {
+            Err(anyhow!("torrent has neither length nor files"))
+        }
+    }
+
+    /// Returns file list for multi-file torrents, empty for single-file.
+    fn file_list(&self) -> Vec<FileInfo> {
+        match &self.files {
+            Some(files) => files
+                .iter()
+                .map(|f| FileInfo {
+                    length: f.length,
+                    path: f.path.clone(),
+                })
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Split bencoded pieces into vectors of SHA-1 hashes.
@@ -159,6 +191,19 @@ impl Torrent {
         Default::default()
     }
 
+    /// Generates a random 20-byte peer ID.
+    ///
+    /// The peer ID uniquely identifies this client instance in the BitTorrent swarm.
+    /// It is randomly generated for each session to prevent tracking.
+    fn generate_peer_id() -> Vec<u8> {
+        let mut peer_id = vec![0u8; 20];
+        let mut rng = rand::rng();
+        for x in peer_id.iter_mut() {
+            *x = rng.random::<u8>();
+        }
+        peer_id
+    }
+
     /// Returns the suggested filename from the torrent metadata.
     ///
     /// This is the filename specified in the torrent's "name" field,
@@ -167,13 +212,23 @@ impl Torrent {
         &self.name
     }
 
+    /// Returns true if this is a multi-file torrent.
+    pub fn is_multi_file(&self) -> bool {
+        !self.files.is_empty()
+    }
+
+    /// Returns the list of files for multi-file torrents.
+    pub fn files(&self) -> &[FileInfo] {
+        &self.files
+    }
+
     /// Open torrent.
     ///
     /// # Arguments
     ///
-    /// * `filepath` - Path to the torrent.
+    /// * `filepath` - Path to the .torrent file.
     ///
-    pub fn open(&mut self, filepath: PathBuf) -> Result<()> {
+    pub fn open_torrent(&mut self, filepath: PathBuf) -> Result<()> {
         // Open torrent
         let mut file = match File::open(filepath) {
             Ok(file) => file,
@@ -191,12 +246,7 @@ impl Torrent {
             Err(_) => return Err(anyhow!("could not decode torrent")),
         };
 
-        // Generate a random 20-byte peer id
-        let mut peer_id: Vec<u8> = vec![0; 20];
-        let mut rng = rand::rng();
-        for x in peer_id.iter_mut() {
-            *x = rng.random::<u8>();
-        }
+        let peer_id = Self::generate_peer_id();
 
         // Add torrent informations
         if !bencode.announce_list.is_empty() {
@@ -212,109 +262,55 @@ impl Torrent {
         self.info_hash = bencode.info.hash()?;
         self.pieces_hashes = bencode.info.split_pieces_hashes()?;
         self.piece_length = bencode.info.piece_length;
-        self.length = bencode.info.length;
+        self.length = bencode.info.total_length()?;
         self.name = bencode.info.name.to_owned();
-        self.peers = self.request_peers(&peer_id, PORT)?;
+        self.files = bencode.info.file_list();
+        self.peers =
+            tracker::request_peers(&self.tiers, &self.info_hash, &peer_id, PORT, self.length)?;
         self.peer_id = peer_id;
 
         Ok(())
     }
 
-    /// Request peers from trackers.
-    fn request_peers(&self, peer_id: &[u8], port: u16) -> Result<Vec<Peer>> {
-        let mut all_peers = Vec::new();
-        let mut seen = HashSet::new();
-
-        for tier in &self.tiers {
-            let mut success = false;
-            for url in tier {
-                if let Ok(peers) = self.query_single_tracker(url, peer_id, port) {
-                    for peer in peers {
-                        if seen.insert((peer.ip, peer.port)) {
-                            all_peers.push(peer);
-                        }
-                    }
-                    success = true;
-                }
-            }
-            if success && !all_peers.is_empty() {
-                break; // Stop after first successful tier
-            }
-        }
-
-        if all_peers.is_empty() {
-            return Err(anyhow!("no peers from any tracker"));
-        }
-
-        for (i, peer) in all_peers.iter_mut().enumerate() {
-            peer.id = i as u32;
-        }
-        Ok(all_peers)
-    }
-
-    /// Query a single tracker for peers.
+    /// Open magnet.
     ///
     /// # Arguments
     ///
-    /// * `announce` - The tracker URL.
-    /// * `peer_id` - The peer ID.
-    /// * `port` - The port number.
+    /// * `uri` - Magnet URI string.
     ///
-    fn query_single_tracker(&self, announce: &str, peer_id: &[u8], port: u16) -> Result<Vec<Peer>> {
-        let url = Self::build_tracker_url(&self.info_hash, announce, peer_id, port, self.length)?;
-        let bytes = reqwest::blocking::get(&url)?.bytes()?;
-        let resp = de::from_bytes::<BencodeTracker>(&bytes)?;
-        self.build_peers(resp.peers.to_vec())
-    }
+    pub fn open_magnet(&mut self, uri: &str) -> Result<()> {
+        // Parse magnet link
+        let magnet_info = magnet::parse_magnet(uri)?;
+        self.info_hash = magnet_info.info_hash;
+        self.name = magnet_info.name;
+        self.tiers = magnet_info.tiers;
 
-    /// Build tracker URL.
-    fn build_tracker_url(
-        info_hash: &[u8],
-        announce: &str,
-        peer_id: &[u8],
-        port: u16,
-        length: u32,
-    ) -> Result<String> {
-        /// Each byte is encoded as %XX where XX is the hexadecimal representation
-        fn percent_encode_binary(data: &[u8]) -> String {
-            const HEX_DIGITS: &[u8] = b"0123456789ABCDEF";
-            let mut encoded = String::with_capacity(data.len() * 3);
+        let peer_id = Self::generate_peer_id();
 
-            for &byte in data {
-                encoded.push('%');
-                // Extract high nibble (first 4 bits) and convert to hex digit
-                encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-                // Extract low nibble (last 4 bits) and convert to hex digit
-                encoded.push(HEX_DIGITS[(byte & 0x0F) as usize] as char);
-            }
+        // Get peers from tracker
+        self.peers =
+            tracker::request_peers(&self.tiers, &self.info_hash, &peer_id, PORT, self.length)?;
+        self.peer_id = peer_id.clone();
 
-            encoded
+        // Fetch metadata from peers
+        let metadata = magnet::fetch_metadata_from_peers(&self.peers, &peer_id, &self.info_hash)?;
+
+        // Parse and verify metadata
+        let info: BencodeInfo = de::from_bytes(&metadata)?;
+        if info.hash()? != self.info_hash {
+            return Err(anyhow!("metadata info_hash mismatch"));
         }
 
-        // Parse tracker URL from torrent
-        let base_url = match Url::parse(announce) {
-            Ok(url) => url,
-            Err(_) => return Err(anyhow!("could not parse tracker url")),
-        };
-
-        // Build query string manually to handle binary data properly
-        let query = format!(
-            "info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left={}&compact=1&event=started",
-            percent_encode_binary(info_hash),
-            percent_encode_binary(peer_id),
-            port,
-            length
-        );
-
-        let mut url = base_url.to_string();
-        if url.contains('?') {
-            url.push('&');
-        } else {
-            url.push('?');
+        // Populate torrent fields
+        self.pieces_hashes = info.split_pieces_hashes()?;
+        self.piece_length = info.piece_length;
+        self.length = info.total_length()?;
+        self.files = info.file_list();
+        if self.name.is_empty() {
+            self.name = info.name;
         }
-        url.push_str(&query);
 
-        Ok(url)
+        Ok(())
     }
 
     /// Download torrent.
@@ -361,7 +357,7 @@ impl Torrent {
         }
 
         // Create progress bar
-        let pb = ProgressBar::new(self.length as u64);
+        let pb = ProgressBar::new(self.length);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} {bytes}/{total_bytes} [{bar:40.cyan/blue}] {percent}%")
@@ -401,15 +397,15 @@ impl Torrent {
     /// * `index` - The piece index.
     ///
     fn get_piece_length(&self, index: u32) -> Result<u32> {
-        let begin: u32 = index * self.piece_length;
-        let mut end: u32 = begin + self.piece_length;
+        let begin: u64 = u64::from(index) * u64::from(self.piece_length);
+        let mut end: u64 = begin + u64::from(self.piece_length);
 
         // Prevent unbounded values
         if end > self.length {
             end = self.length;
         }
 
-        Ok(end - begin)
+        Ok((end - begin) as u32)
     }
 
     /// Get piece offset.

@@ -28,6 +28,7 @@
 //! | 6 | REQUEST | Request a block (payload: index, begin, length) |
 //! | 7 | PIECE | Block data (payload: index, begin, data) |
 //! | 8 | CANCEL | Cancel a request (payload: index, begin, length) |
+//! | 20 | EXTENDED | Extension protocol message (BEP 10) |
 //!
 //! ## Keep-Alive Messages
 //!
@@ -51,6 +52,7 @@ pub const MESSAGE_REQUEST: MessageId = 6;
 pub const MESSAGE_PIECE: MessageId = 7;
 #[allow(dead_code)]
 pub const MESSAGE_CANCEL: MessageId = 8;
+pub const MESSAGE_EXTENDED: MessageId = 20; // Extension protocol (BEP 10)
 pub const MESSAGE_KEEPALIVE: MessageId = 255; // Special value for keep-alive (length 0)
 
 #[derive(Default, Debug)]
