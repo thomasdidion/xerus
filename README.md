@@ -14,7 +14,7 @@ A command-line BitTorrent client, written in Rust.
 Usage: xerus [OPTIONS] <TORRENT>
 
 Arguments:
-  <TORRENT>  Path to the .torrent file
+  <TORRENT>  Path to torrent file or magnet link
 
 Options:
   -o, --output <OUTPUT>  Output filename (defaults to name from torrent)
@@ -37,6 +37,16 @@ And verify the checksum matches that expected from the checksum file:
 ```
 $> sha512sum -c SHA512SUM | grep debian-13.2.0-amd64-netinst.iso
 debian-13.2.0-amd64-netinst.iso: OK
+```
+
+Download from a magnet link:
+
+```
+$> xerus "$(cat big-buck-bunny.magnet)"
+Fetching metadata from 32 peers...
+Metadata received (21307 bytes)
+Downloading "Big Buck Bunny" (1055 pieces)
+Saved in "Big Buck Bunny".
 ```
 
 ## Installation
