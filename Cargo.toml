@@ -1,6 +1,6 @@
 [package]
 name = "xerus"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Thomas Didion <thomas.didion@protonmail.com>"]
 edition = "2021"
 
